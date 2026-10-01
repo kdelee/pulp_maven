@@ -754,8 +754,16 @@ class MavenRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin, Rol
             raise ValidationError({"ordering": str(exc)}) from exc
         names_qs = distinct_ga_qs(content_qs, repo_version, ordering=ordering)
         page_cache = Cache()
+        domain = getattr(getattr(self.request, "pulp_domain", None), "pk", "default")
         page_key = hashlib.sha256(
-            repr((str(repo_version.pk), tuple(sorted(self.request.query_params.lists())))).encode()
+            repr(
+                (
+                    str(domain),
+                    str(repo_version.pk),
+                    self.request.path,
+                    tuple(sorted(self.request.query_params.lists())),
+                )
+            ).encode()
         ).hexdigest()
         if (
             getattr(settings, "MAVEN_PACKAGE_PAGE_CACHE_ENABLED", False)
