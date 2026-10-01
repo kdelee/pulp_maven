@@ -1,4 +1,5 @@
 import hashlib
+import json
 
 from django.conf import settings
 from django.db import transaction
@@ -628,7 +629,7 @@ class MavenRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin, Rol
         original_get_count = paginator.get_count
 
         def get_count(_queryset):
-            if not getattr(settings, "COUNT_CACHE_ENABLED", False) or cache.redis is None:
+            if not getattr(settings, "MAVEN_PACKAGE_COUNT_CACHE_ENABLED", False) or cache.redis is None:
                 return count_qs.count()
             cached = cache.get(cache_key, base_key="PULP_MAVEN_PACKAGE_COUNTS")
             if cached is not None:
@@ -752,6 +753,17 @@ class MavenRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin, Rol
         except ValueError as exc:
             raise ValidationError({"ordering": str(exc)}) from exc
         names_qs = distinct_ga_qs(content_qs, repo_version, ordering=ordering)
+        page_cache = Cache()
+        page_key = hashlib.sha256(
+            repr((str(repo_version.pk), tuple(sorted(self.request.query_params.lists())))).encode()
+        ).hexdigest()
+        if (
+            getattr(settings, "MAVEN_PACKAGE_PAGE_CACHE_ENABLED", False)
+            and page_cache.redis is not None
+        ):
+            cached_page = page_cache.get(page_key, base_key="PULP_MAVEN_PACKAGE_PAGES")
+            if cached_page is not None:
+                return Response(json.loads(cached_page))
         page = self._paginate_package_index(names_qs, content_qs, repo_version)
         rows = assemble_package_index(
             content_qs,
@@ -760,8 +772,20 @@ class MavenRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin, Rol
         )
         serializer = self.get_serializer(rows, many=True)
         if page is not None:
-            return self.get_paginated_response(serializer.data)
-        return Response(serializer.data)
+            response = self.get_paginated_response(serializer.data)
+        else:
+            response = Response(serializer.data)
+        if (
+            getattr(settings, "MAVEN_PACKAGE_PAGE_CACHE_ENABLED", False)
+            and page_cache.redis is not None
+        ):
+            page_cache.set(
+                page_key,
+                json.dumps(response.data),
+                expires=settings.CACHE_SETTINGS["EXPIRES_TTL"],
+                base_key="PULP_MAVEN_PACKAGE_PAGES",
+            )
+        return response
 
     @extend_schema(
         summary="Repository metrics",
