@@ -628,6 +628,8 @@ class MavenRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin, Rol
         original_get_count = paginator.get_count
 
         def get_count(_queryset):
+            if not settings.CACHE_ENABLED or cache.redis is None:
+                return count_qs.count()
             cached = cache.get(cache_key, base_key="PULP_MAVEN_PACKAGE_COUNTS")
             if cached is not None:
                 return int(cached)
