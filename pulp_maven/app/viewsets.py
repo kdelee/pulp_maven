@@ -1,3 +1,6 @@
+import hashlib
+
+from django.conf import settings
 from django.db import transaction
 from django_filters import CharFilter
 from django_filters.rest_framework import filters as drf_filters
@@ -15,6 +18,7 @@ from rest_framework.serializers import (
     ValidationError,
 )
 
+from pulpcore.cache import Cache
 from pulpcore.plugin.actions import ModifyRepositoryActionMixin
 from pulpcore.plugin.models import RepositoryVersion
 from pulpcore.plugin.serializers import AsyncOperationResponseSerializer
@@ -602,7 +606,7 @@ class MavenRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin, Rol
             raise ValidationError({"repository_version": "Must be a version of this repository."})
         return repo_version
 
-    def _paginate_package_index(self, names_qs, content_qs):
+    def _paginate_package_index(self, names_qs, content_qs, repository_version):
         """Paginate distinct packages.
 
         The count is ``COUNT(DISTINCT group_id, artifact_id)`` on the filtered
@@ -613,10 +617,28 @@ class MavenRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin, Rol
         if paginator is None:
             return None
         count_qs = content_qs.order_by().values("group_id", "artifact_id").distinct()
+        cache = Cache()
+        filters = tuple(
+            self.request.query_params.get(name, "")
+            for name in ("group_id__istartswith", "artifact_id__istartswith", "search")
+        )
+        cache_key = hashlib.sha256(
+            repr((str(repository_version.pk), filters)).encode()
+        ).hexdigest()
         original_get_count = paginator.get_count
 
         def get_count(_queryset):
-            return count_qs.count()
+            cached = cache.get(cache_key, base_key="PULP_MAVEN_PACKAGE_COUNTS")
+            if cached is not None:
+                return int(cached)
+            count = count_qs.count()
+            cache.set(
+                cache_key,
+                str(count),
+                expires=settings.CACHE_SETTINGS["EXPIRES_TTL"],
+                base_key="PULP_MAVEN_PACKAGE_COUNTS",
+            )
+            return count
 
         paginator.get_count = get_count
         try:
@@ -728,7 +750,7 @@ class MavenRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin, Rol
         except ValueError as exc:
             raise ValidationError({"ordering": str(exc)}) from exc
         names_qs = distinct_ga_qs(content_qs, repo_version, ordering=ordering)
-        page = self._paginate_package_index(names_qs, content_qs)
+        page = self._paginate_package_index(names_qs, content_qs, repo_version)
         rows = assemble_package_index(
             content_qs,
             page if page is not None else list(names_qs),
